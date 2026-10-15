@@ -90,7 +90,7 @@ try:
 except Exception:                                   # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # --------------------------------------------------------------------------
 # Defaults
@@ -106,7 +106,9 @@ DEFAULT_CONFIG = {
         "mode": "all",              # "all" | "include" | "exclude"
         "include": [],              # identifiers, used when mode is "include"
         "exclude": [],              # identifiers, used when mode is "exclude"
-        "hosts": [],                # extra hosts, for networks that block mDNS
+        "hosts": [],                # extra hosts, for networks that block mDNS.
+                                    # An entry may carry a port: "10.0.0.5:8080"
+        "mdns": True,               # false = skip discovery, use "hosts" only
         "mdns_timeout": 4,          # seconds to listen for mDNS answers
     },
     "location": "auto",             # "auto" (IP geolocation) or "pinned"
@@ -321,6 +323,10 @@ def load_config(path=None):
         if not isinstance(cfg["devices"].get(key), list):
             log("config: devices.%s must be a list; using []" % key)
             cfg["devices"][key] = []
+    if not isinstance(cfg["devices"].get("mdns"), bool):
+        log("config: devices.mdns must be true or false, using %s"
+            % DEFAULT_CONFIG["devices"]["mdns"])
+        cfg["devices"]["mdns"] = DEFAULT_CONFIG["devices"]["mdns"]
     if not isinstance(cfg["antialias"], bool):
         log("config: antialias must be true or false, using %s"
             % DEFAULT_CONFIG["antialias"])
@@ -937,15 +943,21 @@ def device_state(dev, timeout=3):
 def discover_devices(cfg, st):
     """Every reachable Tuneshine, with identity fields for selection."""
     candidates = {}
-    for dev in discover_mdns(cfg["devices"]["mdns_timeout"]):
-        candidates[dev["ip"]] = dev
+    if cfg["devices"]["mdns"]:
+        for dev in discover_mdns(cfg["devices"]["mdns_timeout"]):
+            candidates[dev["ip"]] = dev
 
-    # configured and previously seen hosts, for networks that block multicast
+    # configured and previously seen hosts, for networks that block multicast.
+    # An entry may carry a port, e.g. "10.0.0.5:8080".
     extras = list(cfg["devices"]["hosts"]) + list(st.get("known_hosts") or [])
     for host in extras:
         host = str(host).strip()
         if not host:
             continue
+        port = 80
+        head, sep, tail = host.rpartition(":")
+        if sep and tail.isdigit() and head:
+            host, port = head, int(tail)
         ip = host
         if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
             try:
@@ -953,7 +965,7 @@ def discover_devices(cfg, st):
             except OSError:
                 continue
         candidates.setdefault(ip, {"instance": host, "hostname": host,
-                                   "ip": ip, "port": 80, "txt": {}})
+                                   "ip": ip, "port": port, "txt": {}})
 
     devices = []
     for ip, dev in candidates.items():

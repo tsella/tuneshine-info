@@ -4,6 +4,7 @@
     "include": [],
     "exclude": [],
     "hosts": [],
+    "mdns": true,
     "mdns_timeout": 4
   },
   "location": "auto",

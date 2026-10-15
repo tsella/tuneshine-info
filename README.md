@@ -89,7 +89,8 @@ line in the log.
 | `devices.mode` | `"all"` | Which devices to push to. See [Choosing devices](#choosing-devices). |
 | `devices.include` | `[]` | Device identifiers, used when mode is `include`. |
 | `devices.exclude` | `[]` | Device identifiers, used when mode is `exclude`. |
-| `devices.hosts` | `[]` | Extra hosts to try, for networks that block multicast. |
+| `devices.hosts` | `[]` | Extra hosts to try, for networks that block multicast. An entry may carry a port, such as `10.0.0.5:8080`. |
+| `devices.mdns` | `true` | Set `false` to skip discovery and use `devices.hosts` only. |
 | `devices.mdns_timeout` | `4` | Seconds to listen for mDNS answers. |
 | `location` | `"auto"` | `auto` finds the location from your public IP. `pinned` uses `lat`/`lon`. |
 | `lat`, `lon` | `40.7128`, `-74.0060` | Coordinates for `pinned`, and the fallback when `auto` fails. |
@@ -235,6 +236,19 @@ The log says `no usable font`:
 - This is common on Linux without `nss-mdns`, and it does not matter. Discovery
   uses multicast directly. Use IP addresses in `devices.hosts` if you need to
   name a host explicitly.
+
+## Tests
+
+```sh
+python3 test_tuneshine_info.py
+```
+
+The suite is offline. It never contacts a Tuneshine, the network or the weather
+APIs: mDNS packets are built by hand, the HTTP calls are stubbed, and every state
+path goes to a temporary directory. The tests that must prove something
+*terminates* — the mDNS pointer-loop guard and the lock race — run in
+subprocesses, because a test that can hang cannot be trusted to finish in its own
+process.
 
 ## Credits
 
