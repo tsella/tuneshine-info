@@ -69,6 +69,7 @@ Usage:
 """
 
 import argparse
+import copy
 import fnmatch
 import io
 import json
@@ -82,19 +83,21 @@ import traceback
 from datetime import datetime
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageFont
 
 try:
     from zoneinfo import ZoneInfo
 except Exception:                                   # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # --------------------------------------------------------------------------
 # Defaults
 # --------------------------------------------------------------------------
 MDNS_SERVICE = "_tuneshine._tcp.local"
+MAX_POINTER_JUMPS = 20          # DNS name compression: give up after this many
+LOG_MAX_BYTES = 1_000_000       # rotate the log past this size, keep one backup
 
 DEFAULT_CONFIG = {
     "devices": {
@@ -140,12 +143,9 @@ NA = "--"                                   # placeholder for missing data
 WHITE = (255, 255, 255)
 DIM = (140, 145, 155)
 DIM_DARK = (86, 90, 98)
-HOT = (255, 105, 105)
-COLD = (105, 165, 255)
 RAINBLUE = (70, 140, 255)
 GREEN = (105, 225, 130)
 SUNC = (255, 196, 0)
-RAYC = (255, 150, 0)
 CLOUDC = (196, 203, 216)
 FOGBC = (168, 176, 190)
 
@@ -172,7 +172,7 @@ SLOTS = {
     "aqi":    dict(box=(38, 48, 26, 12), ref="88",  font="reg",  align="center"),
 }
 
-CFG = json.loads(json.dumps(DEFAULT_CONFIG))
+CFG = copy.deepcopy(DEFAULT_CONFIG)
 STATE_DIR = os.path.expanduser(DEFAULT_CONFIG["state_dir"])
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 LOCK_FILE = os.path.join(STATE_DIR, "run.lock")
@@ -196,6 +196,8 @@ def apply_paths(cfg):
 def log(msg):
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX_BYTES:
+            os.replace(LOG_FILE, LOG_FILE + ".1")
         with open(LOG_FILE, "a") as fh:
             fh.write("%s %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
     except OSError:
@@ -223,7 +225,7 @@ def save_state(st):
 
 def load_config(path=None):
     """Merge the user config over the defaults. Never raises."""
-    cfg = json.loads(json.dumps(DEFAULT_CONFIG))       # deep copy
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
     path = path or CONFIG_PATH
     user = {}
     try:
@@ -271,27 +273,25 @@ def load_config(path=None):
         if not isinstance(cfg["devices"].get(key), list):
             log("config: devices.%s must be a list; using []" % key)
             cfg["devices"][key] = []
-    for key in ("antialias",):
-        if not isinstance(cfg[key], bool):
-            log("config: %s must be true or false, using %s" % (key, DEFAULT_CONFIG[key]))
-            cfg[key] = DEFAULT_CONFIG[key]
+    if not isinstance(cfg["antialias"], bool):
+        log("config: antialias must be true or false, using %s"
+            % DEFAULT_CONFIG["antialias"])
+        cfg["antialias"] = DEFAULT_CONFIG["antialias"]
     if not isinstance(cfg["night_dim"].get("enabled"), bool):
         log("config: night_dim.enabled must be true or false, using %s"
             % DEFAULT_CONFIG["night_dim"]["enabled"])
         cfg["night_dim"]["enabled"] = DEFAULT_CONFIG["night_dim"]["enabled"]
-    for key, lo, hi in (("percent", 1, 100),):
-        try:
-            cfg["night_dim"][key] = max(lo, min(hi, int(cfg["night_dim"][key])))
-        except (TypeError, ValueError):
-            log("config: night_dim.%s invalid, using %s"
-                % (key, DEFAULT_CONFIG["night_dim"][key]))
-            cfg["night_dim"][key] = DEFAULT_CONFIG["night_dim"][key]
-    for key in ("frame_brightness",):
-        try:
-            cfg[key] = max(1, min(100, int(cfg[key])))
-        except (TypeError, ValueError):
-            log("config: %s invalid, using %s" % (key, DEFAULT_CONFIG[key]))
-            cfg[key] = DEFAULT_CONFIG[key]
+    try:
+        cfg["night_dim"]["percent"] = max(1, min(100, int(cfg["night_dim"]["percent"])))
+    except (TypeError, ValueError):
+        log("config: night_dim.percent invalid, using %s"
+            % DEFAULT_CONFIG["night_dim"]["percent"])
+        cfg["night_dim"]["percent"] = DEFAULT_CONFIG["night_dim"]["percent"]
+    try:
+        cfg["frame_brightness"] = max(1, min(100, int(cfg["frame_brightness"])))
+    except (TypeError, ValueError):
+        log("config: frame_brightness invalid, using %s" % DEFAULT_CONFIG["frame_brightness"])
+        cfg["frame_brightness"] = DEFAULT_CONFIG["frame_brightness"]
     for key in ("weather_ttl", "location_ttl", "stale_after_seconds", "alert_ttl"):
         try:
             cfg[key] = max(0, int(cfg[key]))
@@ -320,20 +320,30 @@ def load_config(path=None):
 def write_default_config(path, force=False):
     if os.path.exists(path) and not force:
         return False
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     with open(path, "w") as fh:
         json.dump(DEFAULT_CONFIG, fh, indent=2)
         fh.write("\n")
     return True
 
 
+_TZ_CACHE = {}
+
+
 def now_in(cfg):
-    if cfg["timezone"] == "local" or ZoneInfo is None:
+    name = cfg["timezone"]
+    if name == "local" or ZoneInfo is None:
         return datetime.now()
-    try:
-        return datetime.now(ZoneInfo(cfg["timezone"]))
-    except Exception:
-        return datetime.now()
+    tz = _TZ_CACHE.get(name)
+    if tz is None:
+        try:
+            tz = ZoneInfo(name)
+        except Exception:
+            return datetime.now()
+        _TZ_CACHE[name] = tz
+    return datetime.now(tz)
 
 
 def scale(color, factor):
@@ -355,20 +365,75 @@ def aqi_color(aqi):
 
 
 # --------------------------------------------------------------------------
-# Text rasterisation (coverage masks)
+# Fonts and text rasterisation (coverage masks)
 # --------------------------------------------------------------------------
+FONT_CANDIDATES = {
+    "bold": (
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+    ),
+    "reg": (
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ),
+}
+
+_FONT_CACHE = {}
+
+
+def font_path_for(cfg, weight):
+    """Return a usable font file for this weight.
+
+    The configured path wins. When it is missing, the platform candidates are
+    tried in order and the substitution is logged, so a wrong config key shows up
+    as a log line rather than as an opaque failure inside the renderer.
+    """
+    key = "font_bold" if weight == "bold" else "font_reg"
+    configured = cfg.get(key)
+    cache_key = (key, configured)
+    hit = _FONT_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
+    chosen = None
+    if configured and os.path.exists(configured):
+        chosen = configured
+    else:
+        for candidate in FONT_CANDIDATES[weight]:
+            if os.path.exists(candidate):
+                chosen = candidate
+                break
+    if chosen is None:
+        raise RuntimeError(
+            "no usable font: %s=%r does not exist and none of the fallbacks do "
+            "either (%s). Point %s at a .ttf file."
+            % (key, configured, ", ".join(FONT_CANDIDATES[weight]), key))
+    if chosen != configured:
+        log("font: %s=%r unusable, using %s" % (key, configured, chosen))
+    _FONT_CACHE[cache_key] = chosen
+    return chosen
+
+
 BLANK_MASK = Image.new("L", (1, 1), 0)
 
 
-def font_mask(text, font_path, size, antialias=None):
+def font_mask(text, font_path, size, antialias):
     """Rasterise text to a trimmed coverage mask (mode "L", 0-255).
 
     antialias=True keeps FreeType's grayscale coverage, so edges blend the way a
     high-resolution mockup does. antialias=False asks for MONO (mode "1"), which
     hints the outlines onto the pixel grid for hard bilevel pixels.
+
+    antialias is an explicit argument and never read from a module global: a
+    function handed a config must not silently use a different one.
     """
-    if antialias is None:
-        antialias = CFG.get("antialias", True)
     font = ImageFont.truetype(font_path, size)
     core = font.getmask(text, mode="L" if antialias else "1")
     if core.size == (0, 0):
@@ -383,20 +448,26 @@ def font_mask(text, font_path, size, antialias=None):
     return gray.crop(box)
 
 
-def fit_mask(text, font_path, bw, bh, max_size=48):
+def fit_mask(text, font_path, bw, bh, antialias, max_size=48):
     """Largest size at or below max_size whose mask fits bw x bh."""
     for size in range(max_size, 4, -1):
-        mask = font_mask(text, font_path, size)
+        mask = font_mask(text, font_path, size, antialias)
         if mask is not None and mask.width <= bw and mask.height <= bh:
             return mask, size
-    mask = font_mask(text, font_path, 5)
+    mask = font_mask(text, font_path, 5, antialias)
     return (mask if mask is not None else BLANK_MASK), 5
 
 
 class Frame:
-    """64x64 canvas that tracks placed elements so overlap is caught, not shipped."""
+    """64x64 canvas that tracks placed elements so overlap is caught, not shipped.
 
-    def __init__(self):
+    Holds the config it was built with. Every font lookup and the antialias choice
+    come from that config, never from a module global, so render(cfg) means what it
+    says.
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
         self.img = Image.new("RGB", (64, 64), (0, 0, 0))
         self.boxes = []
         self._sizes = {}
@@ -405,9 +476,10 @@ class Frame:
         key = (slot, ref)
         if key not in self._sizes:
             spec = SLOTS[slot]
-            font_path = CFG["font_bold"] if spec["font"] == "bold" else CFG["font_reg"]
+            font_path = font_path_for(self.cfg, spec["font"])
             _mask, size = fit_mask(ref or spec["ref"], font_path,
-                                   spec["box"][2], spec["box"][3])
+                                   spec["box"][2], spec["box"][3],
+                                   self.cfg["antialias"])
             self._sizes[key] = (size, font_path)
         return self._sizes[key]
 
@@ -416,10 +488,8 @@ class Frame:
         spec = SLOTS[slot]
         x0, y0, bw, bh = spec["box"]
         size, font_path = self.slot_size(slot, ref)
-        mask = font_mask(text, font_path, size) or BLANK_MASK
-        while (mask.width > bw or mask.height > bh) and size > 5:
-            size -= 1
-            mask = font_mask(text, font_path, size) or BLANK_MASK
+        mask, size = fit_mask(text, font_path, bw, bh, self.cfg["antialias"],
+                              max_size=size)
         if spec["align"] == "center":
             x = x0 + (bw - mask.width) // 2
         elif spec["align"] == "right":
@@ -440,7 +510,7 @@ class Frame:
             self.img.putpixel((x, y), color)
 
     def icon(self, kind, x, y, factor=1.0):
-        art = make_icon(kind)
+        art = make_icon(kind, self.cfg)
         for mx in range(20):
             for my in range(20):
                 col = art.getpixel((mx, my))
@@ -465,7 +535,7 @@ class Frame:
 # --------------------------------------------------------------------------
 # Colour pixel-art weather icons (20x20)
 # --------------------------------------------------------------------------
-def make_icon(kind):
+def make_icon(kind, cfg):
     ic = Image.new("RGB", (20, 20), (0, 0, 0))
 
     def p(x, y, c):
@@ -532,7 +602,8 @@ def make_icon(kind):
         for y, a, b in ((6, 5, 15), (9, 2, 17), (12, 6, 16), (15, 3, 14)):
             r(a, y, b, y, FOGBC)
     else:                                       # "unknown" - no weather data
-        mask, _size = fit_mask("?", CFG["font_bold"], 16, 16, max_size=16)
+        mask, _size = fit_mask("?", font_path_for(cfg, "bold"), 16, 16,
+                               cfg["antialias"], max_size=16)
         ox, oy = (20 - mask.width) // 2, (20 - mask.height) // 2
         for mx in range(mask.width):
             for my in range(mask.height):
@@ -553,7 +624,7 @@ def render(cfg, hour_text, hour_ref, minute_text, icon, temp_v, rain_v, aqi_v, u
     weather_dim / aqi_dim are 1.0 for fresh data and below 1.0 for stale data.
     brightness overrides cfg["frame_brightness"] (see night_brightness).
     """
-    frame = Frame()
+    frame = Frame(cfg)
     frame.put("hour", hour_text, WHITE, ref=hour_ref)
     frame.put("minute", minute_text, WHITE)
 
@@ -577,9 +648,8 @@ def render(cfg, hour_text, hour_ref, minute_text, icon, temp_v, rain_v, aqi_v, u
 def frame_ascii(img):
     """Ground-truth dump. Buckets each pixel to the nearest palette colour so that
     blended (antialiased) edge pixels still classify correctly."""
-    palette = [(WHITE, "#"), (DIM, "d"), (DIM_DARK, "x"), (HOT, "R"), (COLD, "B"),
-               (RAINBLUE, "b"), (GREEN, "G"), (SUNC, "Y"), (RAYC, "y"),
-               (CLOUDC, "C"), (FOGBC, "f")]
+    palette = [(WHITE, "#"), (DIM, "d"), (DIM_DARK, "x"), (RAINBLUE, "b"),
+               (GREEN, "G"), (SUNC, "Y"), (CLOUDC, "C"), (FOGBC, "f")]
     lines = []
     for y in range(64):
         row = []
@@ -610,7 +680,7 @@ def _encode_name(name):
 
 
 def _parse_name(data, off):
-    labels, start, jumped = [], off, False
+    labels, start, jumped, jumps = [], off, False, 0
     while True:
         if off >= len(data):
             return ".".join(labels), start
@@ -621,7 +691,16 @@ def _parse_name(data, off):
                 start = off
             return ".".join(labels), start
         if ln & 0xC0 == 0xC0:
+            if off + 2 > len(data):
+                return ".".join(labels), start
             ptr = struct.unpack(">H", data[off:off + 2])[0] & 0x3FFF
+            # A malformed or hostile packet can point a name at itself, or chain
+            # pointers in a loop. Bound the jumps so the parser terminates instead
+            # of spinning in this loop forever.
+            jumps += 1
+            if jumps > MAX_POINTER_JUMPS:
+                log("mDNS: compression pointer loop, name truncated")
+                return ".".join(labels), start
             if not jumped:
                 start = off + 2
             off = ptr
@@ -738,7 +817,7 @@ def discover_mdns(wait=4.0):
         # An instance with no A record yet gets its own follow-up query.
         for inst in list(instances):
             target, _port = srv.get(inst, (None, None))
-            if target and target not in addrs and not addrs.get(target):
+            if target and target not in addrs:
                 for rec in _mdns_query(sock, target, 1, 2.0):
                     if rec["type"] == "A":
                         addrs[rec["name"]] = rec["value"]
@@ -765,9 +844,12 @@ def discover_mdns(wait=4.0):
 # --------------------------------------------------------------------------
 # Device identity and selection
 # --------------------------------------------------------------------------
+NON_ALNUM = re.compile(r"[^a-z0-9]")
+
+
 def _variants(value):
     v = str(value).strip().lower()
-    return {v, re.sub(r"[^a-z0-9]", "", v)}
+    return {v, NON_ALNUM.sub("", v)}
 
 
 def device_matches(entry, dev):
@@ -779,11 +861,12 @@ def device_matches(entry, dev):
     e = str(entry).strip().lower()
     if not e:
         return False
+    e_flat = NON_ALNUM.sub("", e)
     for ident in dev.get("identities", []):
         if fnmatch.fnmatch(str(ident).strip().lower(), e):
             return True
         for v in _variants(ident):
-            if fnmatch.fnmatch(v, e) or v == re.sub(r"[^a-z0-9]", "", e):
+            if fnmatch.fnmatch(v, e) or v == e_flat:
                 return True
     return False
 
@@ -989,7 +1072,12 @@ def weather_for(cfg, st):
     lat, lon, label = locate(cfg, st)
     fresh = fetch_weather(lat, lon, cfg["units"])
     merged = merge_weather(fresh, cached)
-    merged["last_fetch"] = time.time()
+    # Start the TTL clock only when at least one source answered. Otherwise a
+    # single transient failure caches an all-None result for a whole weather_ttl,
+    # and the display shows "--" for minutes on end with no retry.
+    merged["last_fetch"] = time.time() if (fresh.get("fc_ts") or fresh.get("aqi_ts")) else 0
+    if not merged["last_fetch"]:
+        log("weather: both sources failed, will retry on the next run")
     merged["lat"], merged["lon"], merged["label"] = lat, lon, label
 
     notes = list(fresh["errors"])
@@ -1093,9 +1181,9 @@ def build_frame(cfg, weather, at):
     return frame, info
 
 
-def print_devices(devices, cfg, selected=None, skipped=None):
+def print_devices(devices, cfg, selected=None):
+    """One line per device. With `selected`, each device is marked -> or --."""
     sel_ids = {id(d) for d in (selected or [])}
-    skip_ids = {id(d) for d in (skipped or [])}
     for dev in devices:
         mark = " "
         if selected is not None:
@@ -1116,19 +1204,17 @@ def run(args, cfg):
 
     devices = discover_devices(cfg, st)
     if not devices:
-        save_state(st)
         return _fail(st, "no Tuneshine found on the network (mDNS silent, "
                          "no configured hosts reachable)", cfg)
 
     selected, skipped = select_devices(devices, cfg)
 
     if args.list_devices:
-        print_devices(devices, cfg, selected, skipped)
+        print_devices(devices, cfg, selected)
         save_state(st)
         return 0
 
     if not selected:
-        save_state(st)
         return _fail(st, "no device selected: %d found, all filtered out by "
                          "devices.mode=%s" % (len(devices), cfg["devices"]["mode"]), cfg)
 
@@ -1155,7 +1241,7 @@ def run(args, cfg):
             if is_night else "  (day)"))
         print()
         print("devices (%d found, %d selected):" % (len(devices), len(selected)))
-        print_devices(devices, cfg, selected, skipped)
+        print_devices(devices, cfg, selected)
         for dev in selected:
             rec = (st.get("devices") or {}).get(dev["ip"]) or {}
             remote = (dev["state"].get("remoteMetadata") or {})
@@ -1171,7 +1257,6 @@ def run(args, cfg):
 
     problems = frame.problems()
     if problems:
-        save_state(st)
         return _fail(st, "layout problems: %s" % "; ".join(problems), cfg)
 
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -1245,7 +1330,6 @@ def run(args, cfg):
 
     if fetched:
         st["weather"] = weather
-    save_state(st)
 
     detail = "%s %dB -> %s" % (info, len(payload),
                                ", ".join(d["ip"] for d in pushed) or "none")
@@ -1301,8 +1385,20 @@ def main():
     apply_paths(CFG)
     os.makedirs(STATE_DIR, exist_ok=True)
 
-    if os.path.exists(LOCK_FILE) and not (args.preview or args.dump or args.status
-                                          or args.list_devices):
+    def execute():
+        try:
+            return run(args, CFG)
+        except Exception:
+            log("UNEXPECTED %s" % traceback.format_exc().replace("\n", " | "))
+            return _fail(load_state(), "unexpected error, see log", CFG)
+
+    if args.preview or args.dump or args.status or args.list_devices:
+        # A read-only command must not create or remove the lock. Doing so clears
+        # the lock of a push run that is still in flight, and the next minute's
+        # run can then start beside it.
+        return execute()
+
+    if os.path.exists(LOCK_FILE):
         try:
             age = time.time() - os.path.getmtime(LOCK_FILE)
         except OSError:
@@ -1312,10 +1408,7 @@ def main():
     with open(LOCK_FILE, "w") as fh:
         fh.write(str(os.getpid()))
     try:
-        return run(args, CFG)
-    except Exception:
-        log("UNEXPECTED %s" % traceback.format_exc().replace("\n", " | "))
-        return _fail(load_state(), "unexpected error, see log", CFG)
+        return execute()
     finally:
         try:
             os.remove(LOCK_FILE)

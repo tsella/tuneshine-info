@@ -107,8 +107,8 @@ line in the log.
 | `location_ttl` | `86400` | Seconds an IP geolocation result is reused. |
 | `stale_after_seconds` | `1800` | Older weather than this renders dimmed. |
 | `alert_ttl` | `21600` | Minimum seconds between failure messages. |
-| `state_dir` | `~/.cache/tuneshine-info` | Where the log, state and preview PNG live. |
-| `font_bold`, `font_reg` | Liberation Sans | Font files used for the time and the weather column. |
+| `state_dir` | `~/.cache/tuneshine-info` | Where the log, state and preview PNG live. The log rotates at 1 MB, keeping one backup. |
+| `font_bold`, `font_reg` | Liberation Sans | Font files for the time and the weather column. If the configured file is missing, a list of common system fonts is tried and the substitution is logged. |
 
 `night_dim.percent` is a percentage of `frame_brightness`. With
 `frame_brightness: 60` and `night_dim.percent: 50`, the night value is 30, not
@@ -224,6 +224,11 @@ The display does not change:
 - Run `--status`. If a device shows `playing=true`, it is playing music and is
   being left alone on purpose.
 - Run `--preview`. It reports which devices would be pushed to.
+
+The log says `no usable font`:
+
+- Neither the configured font nor any fallback exists on this machine. Point
+  `font_bold` and `font_reg` at a `.ttf` file it does have.
 
 `.local` hostnames do not resolve:
 
