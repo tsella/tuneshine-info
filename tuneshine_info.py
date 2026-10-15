@@ -98,6 +98,8 @@ VERSION = "1.1.0"
 MDNS_SERVICE = "_tuneshine._tcp.local"
 MAX_POINTER_JUMPS = 20          # DNS name compression: give up after this many
 LOG_MAX_BYTES = 1_000_000       # rotate the log past this size, keep one backup
+LOCK_MAX_AGE = 50               # a lock older than this is debris from a crash
+LOCATION_RETRY_SECONDS = 300    # wait this long before retrying a failed lookup
 
 DEFAULT_CONFIG = {
     "devices": {
@@ -221,6 +223,52 @@ def save_state(st):
         os.replace(tmp, STATE_FILE)
     except OSError as exc:
         log("state save failed: %s" % exc)
+
+
+def acquire_lock(max_age=LOCK_MAX_AGE):
+    """Take the run lock. True when this process owns it.
+
+    O_EXCL, so two runs starting in the same instant cannot both win. A lock older
+    than max_age is debris from a killed run and is replaced; no healthy run lasts
+    anywhere near that long.
+    """
+    for _ in range(2):
+        try:
+            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(LOCK_FILE)
+            except OSError:
+                continue                    # it vanished; try to create it again
+            if age < max_age:
+                return False                # a live run holds it
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
+            continue
+        except OSError as exc:
+            log("lock: cannot create %s: %s" % (LOCK_FILE, exc))
+            return True                     # a lock problem must not stop the push
+        with os.fdopen(fd, "w") as fh:
+            fh.write(str(os.getpid()))
+        return True
+    return False
+
+
+def release_lock():
+    """Remove the lock, but only while this process still holds it."""
+    try:
+        with open(LOCK_FILE) as fh:
+            holder = fh.read().strip()
+    except OSError:
+        return
+    if holder != str(os.getpid()):
+        return                              # a later run owns it now
+    try:
+        os.remove(LOCK_FILE)
+    except OSError:
+        pass
 
 
 def load_config(path=None):
@@ -957,9 +1005,12 @@ def locate(cfg, st):
     """Return (lat, lon, label). Pinned config wins; otherwise IP, then config."""
     if cfg["location"] == "pinned":
         return cfg["lat"], cfg["lon"], cfg["label"]
-    age = time.time() - st.get("loc_ts", 0)
-    if st.get("lat") and age < cfg["location_ttl"]:
+    if st.get("lat") and time.time() - st.get("loc_ts", 0) < cfg["location_ttl"]:
         return st["lat"], st["lon"], st.get("loc_label") or cfg["label"]
+    # A failed lookup must not be retried on every run. During an outage that is
+    # one blocking request a minute that cannot succeed.
+    if time.time() - st.get("loc_fail_ts", 0) < LOCATION_RETRY_SECONDS:
+        return cfg["lat"], cfg["lon"], cfg["label"]
     try:
         resp = requests.get("https://ipinfo.io/json", timeout=8)
         resp.raise_for_status()
@@ -969,9 +1020,13 @@ def locate(cfg, st):
             lat, lon = (float(v) for v in loc.split(",")[:2])
             label = payload.get("city") or cfg["label"]
             st.update(lat=lat, lon=lon, loc_ts=time.time(), loc_label=label)
+            st.pop("loc_fail_ts", None)
             return lat, lon, label
+        log("ipinfo returned no location: %r" % payload)
+        st["loc_fail_ts"] = time.time()
     except (requests.RequestException, ValueError, KeyError) as exc:
         log("ipinfo lookup failed: %s" % exc)
+        st["loc_fail_ts"] = time.time()
     return cfg["lat"], cfg["lon"], cfg["label"]
 
 
@@ -1398,22 +1453,12 @@ def main():
         # run can then start beside it.
         return execute()
 
-    if os.path.exists(LOCK_FILE):
-        try:
-            age = time.time() - os.path.getmtime(LOCK_FILE)
-        except OSError:
-            age = 10 ** 6
-        if age < 50:
-            return 0
-    with open(LOCK_FILE, "w") as fh:
-        fh.write(str(os.getpid()))
+    if not acquire_lock():
+        return 0
     try:
         return execute()
     finally:
-        try:
-            os.remove(LOCK_FILE)
-        except OSError:
-            pass
+        release_lock()
 
 
 if __name__ == "__main__":
