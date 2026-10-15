@@ -1,0 +1,23 @@
+# tuneshine-info -- example crontab
+#
+# Pushes a clock + weather frame to every Tuneshine on the LAN, once a minute,
+# whenever a device is idle.
+#
+# Install:
+#   crontab -e
+# and paste the line at the bottom, editing the path.
+#   -- or --
+#   crontab crontab.example
+#
+# Notes:
+#   * Use an absolute python path. cron's PATH is minimal and often has no
+#     `python3`.
+#   * The machine running this must be online. It is the thing that pushes to
+#     the device, so nothing updates while it is off.
+#   * stdout and stderr are discarded here. The script prints only on a new
+#     failure and on recovery, and always writes a line to
+#     <state_dir>/tuneshine_info.log.
+#   * Check your config first with an absolute path to be safe:
+#     /usr/bin/python3 /opt/tuneshine-info/tuneshine_info.py --preview
+
+* * * * * /usr/bin/python3 /opt/tuneshine-info/tuneshine_info.py >/dev/null 2>&1
