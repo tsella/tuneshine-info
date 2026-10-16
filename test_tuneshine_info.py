@@ -265,6 +265,16 @@ class TestConfig(Base):
         self.assertEqual(cfg["clock"], "24h")
         self.assertEqual(cfg["location"], "auto")
 
+    def test_zero_night_percent_is_accepted(self):
+        p = os.path.join(self.tmp, "c.json")
+        json.dump({"night_dim": {"percent": 0}}, open(p, "w"))
+        self.assertEqual(mod.load_config(p)["night_dim"]["percent"], 0)
+
+    def test_negative_night_percent_clamps_to_zero(self):
+        p = os.path.join(self.tmp, "c.json")
+        json.dump({"night_dim": {"percent": -20}}, open(p, "w"))
+        self.assertEqual(mod.load_config(p)["night_dim"]["percent"], 0)
+
     def test_numeric_bounds_clamped(self):
         p = os.path.join(self.tmp, "c.json")
         json.dump({"frame_brightness": 500, "night_dim": {"percent": 999},
@@ -504,10 +514,23 @@ class TestNightBrightness(Base):
         self.assertTrue(night)
         self.assertEqual(b, 30)      # 50 percent OF 60, not 50
 
-    def test_never_below_one(self):
+    def test_zero_percent_gives_zero_brightness(self):
+        cfg = self.config(frame_brightness=100, night_dim={"enabled": True, "percent": 0})
+        w = {"sunrise": "2026-10-15T07:07", "sunset": "2026-10-15T18:15"}
+        self.assertEqual(mod.night_brightness(cfg, w, datetime(2026, 10, 15, 23, 0)),
+                         (0, True))
+
+    def test_zero_percent_leaves_daylight_alone(self):
+        cfg = self.config(frame_brightness=100, night_dim={"enabled": True, "percent": 0})
+        w = {"sunrise": "2026-10-15T07:07", "sunset": "2026-10-15T18:15"}
+        self.assertEqual(mod.night_brightness(cfg, w, datetime(2026, 10, 15, 12, 0)),
+                         (100, False))
+
+    def test_brightness_is_never_negative(self):
         cfg = self.config(frame_brightness=1, night_dim={"enabled": True, "percent": 1})
         w = {"sunrise": "2026-10-15T07:07", "sunset": "2026-10-15T18:15"}
-        self.assertEqual(mod.night_brightness(cfg, w, datetime(2026, 10, 15, 23, 0))[0], 1)
+        self.assertGreaterEqual(
+            mod.night_brightness(cfg, w, datetime(2026, 10, 15, 23, 0))[0], 0)
 
     def test_missing_times_keep_full_brightness(self):
         cfg = self.config(frame_brightness=100, night_dim={"enabled": True, "percent": 50})
@@ -631,6 +654,22 @@ class TestFrame(Base):
         def total(img):
             return sum(sum(px) for px in img.getdata())
         self.assertLess(total(night.img), total(self.build().img))
+
+    def test_zero_percent_night_frame_is_fully_black(self):
+        cfg = self.config(night_dim={"enabled": True, "percent": 0})
+        frame = mod.build_frame(cfg, self.weather(), datetime(2026, 10, 15, 23, 0))[0]
+        self.assertEqual(set(frame.img.getdata()), {(0, 0, 0)})
+        self.assertEqual(frame.problems(), [])
+
+    def test_zero_percent_frame_still_encodes_and_stays_small(self):
+        cfg = self.config(night_dim={"enabled": True, "percent": 0})
+        frame = mod.build_frame(cfg, self.weather(), datetime(2026, 10, 15, 23, 0))[0]
+        buf = BytesIO()
+        frame.img.save(buf, format="WEBP", lossless=True, quality=100)
+        data = buf.getvalue()
+        self.assertEqual(data[:4], b"RIFF")
+        self.assertEqual(data[8:12], b"WEBP")
+        self.assertLess(len(data), 200, "a black frame should compress to almost nothing")
 
 
 # --------------------------------------------------------------------------

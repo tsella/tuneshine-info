@@ -121,7 +121,8 @@ DEFAULT_CONFIG = {
     "frame_brightness": 100,        # 1-100, scales this frame's pixels only
     "night_dim": {                  # dim the frame between sunset and sunrise
         "enabled": True,
-        "percent": 50,              # percent OF frame_brightness, not of full
+        "percent": 50,              # percent OF frame_brightness, not of full.
+                                    # 0 is fully black, i.e. the panel off.
     },
     "antialias": True,              # blend glyph edges (matches a high-res mockup)
                                     # false = hard bilevel pixels (mode "1" MONO)
@@ -336,7 +337,7 @@ def load_config(path=None):
             % DEFAULT_CONFIG["night_dim"]["enabled"])
         cfg["night_dim"]["enabled"] = DEFAULT_CONFIG["night_dim"]["enabled"]
     try:
-        cfg["night_dim"]["percent"] = max(1, min(100, int(cfg["night_dim"]["percent"])))
+        cfg["night_dim"]["percent"] = max(0, min(100, int(cfg["night_dim"]["percent"])))
     except (TypeError, ValueError):
         log("config: night_dim.percent invalid, using %s"
             % DEFAULT_CONFIG["night_dim"]["percent"])
@@ -1174,6 +1175,9 @@ def night_brightness(cfg, weather, at):
     Open-Meteo call as the temperature, in the location's local time. Falls back
     to frame_brightness whenever the schedule is off or the times are unknown, so
     a failed forecast never leaves the display stuck dim.
+
+    percent 0 gives brightness 0, which renders a fully black frame: the panel
+    goes dark overnight instead of showing a dim clock.
     """
     base = cfg["frame_brightness"]
     schedule = cfg["night_dim"]
@@ -1191,7 +1195,7 @@ def night_brightness(cfg, weather, at):
     now = at.replace(tzinfo=None)
     if not (now >= sett or now < rise):         # daylight
         return base, False
-    return max(1, int(round(base * schedule["percent"] / 100.0))), True
+    return max(0, int(round(base * schedule["percent"] / 100.0))), True
 
 
 # --------------------------------------------------------------------------

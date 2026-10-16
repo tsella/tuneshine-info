@@ -100,7 +100,7 @@ line in the log.
 | `timezone` | `"local"` | `local`, or an IANA name such as `America/New_York`. |
 | `frame_brightness` | `100` | 1 to 100. Scales this frame's pixels only. |
 | `night_dim.enabled` | `true` | Dim the frame between sunset and sunrise. |
-| `night_dim.percent` | `50` | Percentage **of** `frame_brightness`, not of full. |
+| `night_dim.percent` | `50` | Percentage **of** `frame_brightness`, not of full. `0` renders a black frame, so the panel is dark overnight. |
 | `antialias` | `true` | Blend glyph edges. `false` gives hard, single-colour pixels. |
 | `brightness.set` | `false` | `true` also writes idle/active brightness to the device. |
 | `brightness.idle`, `brightness.active` | `50`, `50` | Values used when `brightness.set` is true. |
@@ -114,6 +114,11 @@ line in the log.
 `night_dim.percent` is a percentage of `frame_brightness`. With
 `frame_brightness: 60` and `night_dim.percent: 50`, the night value is 30, not
 50.
+
+Set `night_dim.percent` to `0` to turn the panel off overnight: the frame is
+rendered fully black and pushed as usual, so the display stays dark until sunrise
+and the device keeps its normal idle behaviour. At `0` the night frame is a
+40-byte WebP instead of roughly 1.5 kB.
 
 ## Choosing devices
 
