@@ -83,14 +83,14 @@ import traceback
 from datetime import datetime
 
 import requests
-from PIL import Image, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 try:
     from zoneinfo import ZoneInfo
 except Exception:                                   # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # --------------------------------------------------------------------------
 # Defaults
@@ -724,6 +724,58 @@ def frame_ascii(img):
 
 
 # --------------------------------------------------------------------------
+# Panel simulation (preview only)
+# --------------------------------------------------------------------------
+# The frame pushed to the device is a 64x64 image. What the eye sees is 4096
+# separately lit dies behind a diffuser: each pixel is a circle, and a bright one
+# spills light into its neighbours. That difference matters. A figure that looks
+# cramped when the buffer is magnified can read cleanly on the panel, and a
+# small mark that seems lost in the buffer becomes a lit die. Simulating it keeps
+# design decisions honest.
+#
+# Never upload a simulated image. It is 4x the panel and fails the device's
+# 64x64 requirement.
+PANEL_RGB = (6, 7, 9)
+LED_FLOOR = (14, 15, 18)      # an unlit die still catches stray light
+LED_RADIUS = 0.42             # of one cell
+HALO_RADIUS = 1.45            # multiple of the LED radius
+HALO_ALPHA = 0.22
+GLOW_THRESHOLD = 35           # mean channel value below this gets no halo
+
+
+def simulate_panel(img, scale=8, glow=True, supersample=4):
+    """Render a 64x64 frame as a physical LED panel would show it.
+
+    Each framebuffer pixel becomes a circular die on a near-black substrate, with
+    a translucent halo standing in for the diffuser. Drawn supersampled and then
+    downscaled so the circles are not jagged.
+
+    Preview only. The device takes the frame itself.
+    """
+    cell = scale
+    big = Image.new("RGB", (64 * cell * supersample, 64 * cell * supersample), PANEL_RGB)
+    d = ImageDraw.Draw(big, "RGBA")
+    radius = cell * LED_RADIUS * supersample
+    step = cell * supersample
+
+    px = img.load()
+    for y in range(64):
+        for x in range(64):
+            r, g, b = px[x, y][:3]
+            cx, cy = x * step + step / 2, y * step + step / 2
+            if glow and (r + g + b) / 3.0 > GLOW_THRESHOLD:
+                h = radius * HALO_RADIUS
+                d.ellipse([cx - h, cy - h, cx + h, cy + h],
+                          fill=(r, g, b, int(HALO_ALPHA * 255)))
+            d.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
+                      fill=(max(r, LED_FLOOR[0]), max(g, LED_FLOOR[1]), max(b, LED_FLOOR[2])))
+
+    if supersample > 1:
+        big = big.resize((64 * cell, 64 * cell), Image.LANCZOS)
+    return big
+
+
+# --------------------------------------------------------------------------
 # mDNS discovery (stdlib only)
 # --------------------------------------------------------------------------
 def _encode_name(name):
@@ -1340,6 +1392,10 @@ def run(args, cfg):
 
     if args.preview:
         print("preview written: %s" % PREVIEW_FILE)
+        if args.simulate:
+            panel_file = os.path.join(STATE_DIR, "preview-panel.png")
+            simulate_panel(frame.img).save(panel_file)
+            print("panel simulation written: %s" % panel_file)
         print("frame: %s" % info)
         print("would push to %d device(s): %s" % (
             len(selected), ", ".join("%s (%s)" % (d["name"], d["ip"]) for d in selected)))
@@ -1433,6 +1489,8 @@ def main():
     parser.add_argument("--preview", action="store_true",
                         help="render a PNG and say what would be pushed, do not upload")
     parser.add_argument("--dump", action="store_true", help="print the frame as ASCII")
+    parser.add_argument("--simulate", action="store_true",
+                        help="with --preview, also write a panel simulation (preview only)")
     parser.add_argument("--status", action="store_true",
                         help="print config, devices and cached weather")
     parser.add_argument("--list-devices", action="store_true",

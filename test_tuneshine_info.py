@@ -30,6 +30,8 @@ from io import BytesIO
 
 import importlib.util
 
+from PIL import Image
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.path.join(HERE, "tuneshine_info.py")
 
@@ -987,6 +989,46 @@ class TestCli(Base):
         done = self.run_cli("--force", "--config", cfgp)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.stub.uploads, [])
+
+
+class TestPanelSimulation(Base):
+    """The simulation is a preview tool, so the tests guard its shape and that it
+    never mutates the frame it is given."""
+
+    def _frame(self, colour=(255, 255, 255)):
+        img = Image.new("RGB", (64, 64), (0, 0, 0))
+        img.putpixel((10, 10), colour)
+        return img
+
+    def test_scale_sets_output_size(self):
+        for scale in (4, 8):
+            out = mod.simulate_panel(self._frame(), scale=scale)
+            self.assertEqual(out.size, (64 * scale, 64 * scale))
+
+    def test_lit_die_is_brighter_than_the_panel_floor(self):
+        out = mod.simulate_panel(self._frame(), scale=8)
+        centre = out.getpixel((10 * 8 + 4, 10 * 8 + 4))
+        dark = out.getpixel((40 * 8 + 4, 40 * 8 + 4))
+        self.assertGreater(sum(centre), sum(dark))
+
+    def test_unlit_pixels_get_a_floor_not_pure_black(self):
+        out = mod.simulate_panel(self._frame(), scale=8)
+        self.assertNotEqual(out.getpixel((4, 4)), (0, 0, 0))
+
+    def test_source_frame_is_not_modified(self):
+        img = self._frame()
+        before = img.tobytes()
+        mod.simulate_panel(img, scale=4)
+        self.assertEqual(img.tobytes(), before)
+
+    def test_glow_off_removes_the_halo(self):
+        img = self._frame()
+        with_glow = mod.simulate_panel(img, scale=8, glow=True)
+        without = mod.simulate_panel(img, scale=8, glow=False)
+        # The halo covers pixels the die itself does not, so the whole panel
+        # carries more light with the glow on.
+        total = lambda im: sum(sum(p) for p in im.getdata())
+        self.assertGreater(total(with_glow), total(without))
 
 
 if __name__ == "__main__":

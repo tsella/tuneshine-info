@@ -2,7 +2,9 @@
 
 Show a clock and the local weather on every Tuneshine on your network.
 
-![example frame](example-frame.png)
+![example panel](example-frame.png)
+
+*The panel simulation: 64x64, rendered at 09:41 with night dim off.*
 
 A Tuneshine is a small 64x64 LED display made for album art. This tool uses the
 device's local HTTP API to take over its idle screen: when no music is playing,
@@ -62,6 +64,15 @@ Render a frame without touching the device:
 ```sh
 python3 tuneshine_info.py --preview
 ```
+
+That writes the exact 64x64 buffer to `preview.png`. To also see it as the
+panel will show it:
+
+```sh
+python3 tuneshine_info.py --preview --simulate
+```
+
+which adds `preview-panel.png` beside it.
 
 If that looks right, push one frame for real:
 
@@ -193,6 +204,27 @@ back and the job runs again.
 This is also why the tool works with the device's own artwork instead of fighting
 it. The frame is uploaded as an idle image, so the device shows it only when it
 has nothing better to show, and it keeps the device's normal behaviour intact.
+
+## Judging a frame
+
+A 64x64 image magnified with square pixels is not what the panel looks like. The
+device is 4096 separately lit dies under a diffuser: each pixel is a circle, and
+a bright one spills light into its neighbours. That difference changes what reads
+well. A figure that looks cramped in the buffer can be clear on the panel, and a
+small mark that seems lost in the buffer becomes a lit pixel you can see.
+
+`simulate_panel()` draws that view. Each framebuffer pixel becomes a circular die
+on a near-black substrate, with a translucent halo behind anything above a
+brightness threshold standing in for the diffuser. Unlit dies get a slight floor
+rather than pure black, because a dark LED still catches stray light.
+
+It is preview only. The device takes the 64x64 frame, never the simulation.
+
+![raw frame](example-frame-raw.png)
+
+*The same frame as a raw buffer at 8x nearest-neighbour. Compare it with the
+simulation at the top of this page: the glow rounds off the stair-stepping on the
+curves, and the small figures hold together better.*
 
 ## How it works
 
